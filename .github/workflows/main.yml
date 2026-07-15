@@ -3,8 +3,8 @@ name: Send emails daily
 on:
   workflow_dispatch:
   schedule:
-    - cron: '17 7 * * *'
-      timezone: 'America/Denver'
+    - cron: '17 9 * * *'
+      timezone: 'Europe/Zurich'
 
 concurrency:
   group: zotero-arxiv-daily
