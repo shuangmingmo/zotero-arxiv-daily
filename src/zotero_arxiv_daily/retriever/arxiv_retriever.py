@@ -5,11 +5,10 @@ from ..protocol import Paper
 from ..utils import extract_markdown_from_pdf, extract_tex_code_from_tar
 from tempfile import TemporaryDirectory
 import feedparser
-from tqdm import tqdm
 import multiprocessing
 import os
+import re
 from queue import Empty
-from time import sleep
 from typing import Any, Callable, TypeVar
 from loguru import logger
 import requests
@@ -17,17 +16,63 @@ import requests
 T = TypeVar("T")
 
 DOWNLOAD_TIMEOUT = (10, 60)
+# Hard wall-clock limit for each full-text download (tar source, HTML page, PDF).
+FULL_TEXT_DOWNLOAD_TIMEOUT = 20
 PDF_EXTRACT_TIMEOUT = 180
 TAR_EXTRACT_TIMEOUT = 180
+# After this many papers in a row without full text, stop downloading full text for the run.
+FULL_TEXT_MAX_CONSECUTIVE_FAILURES = 3
+
+API_BATCH_SIZE = 20
+# Statuses meaning the arXiv API is refusing this client (e.g. HTTP 406 for GitHub-hosted
+# runners). Once seen, the API is skipped for the rest of the run.
+API_BLOCKED_STATUSES = {403, 406, 429, 503}
+# RSS summaries look like "arXiv:2508.13426v1 Announce Type: new \nAbstract: <text>".
+RSS_SUMMARY_HEADER = re.compile(r"^arXiv:\S+\s+Announce Type:\s*\S+\s*Abstract:\s*")
 
 
-def _download_file(url: str, path: str) -> None:
+def _split_rss_authors(creator: str) -> list[str]:
+    # dc:creator is "A, B (Affil, X), C": split on top-level commas and drop parenthesised affiliations.
+    names, current, depth = [], "", 0
+    for ch in creator:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(depth - 1, 0)
+        elif depth == 0:
+            if ch == ",":
+                names.append(current)
+                current = ""
+            else:
+                current += ch
+    names.append(current)
+    return [" ".join(name.split()) for name in names if name.strip()]
+
+
+def _rss_entry_to_result(entry) -> ArxivResult:
+    arxiv_id = entry.id.removeprefix("oai:arXiv.org:")
+    return ArxivResult(
+        entry_id=f"https://arxiv.org/abs/{arxiv_id}",
+        title=entry.get("title", "").strip(),
+        authors=[ArxivResult.Author(name) for name in _split_rss_authors(entry.get("author", ""))],
+        summary=RSS_SUMMARY_HEADER.sub("", entry.get("summary", "")).strip(),
+        links=[ArxivResult.Link(f"https://arxiv.org/pdf/{arxiv_id}", title="pdf", rel="related", content_type="application/pdf")],
+    )
+
+
+def _missing_fields(paper: ArxivResult) -> list[str]:
+    fields = {"title": paper.title, "abstract": paper.summary, "authors": paper.authors}
+    return [name for name, value in fields.items() if not value]
+
+
+def _download_file(url: str, path: str) -> str:
     with requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT) as response:
         response.raise_for_status()
         with open(path, "wb") as file:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     file.write(chunk)
+    return path
 
 
 def _run_in_subprocess(
@@ -77,11 +122,14 @@ def _run_with_hard_timeout(
     return None
 
 
-def _extract_text_from_pdf_worker(pdf_url: str) -> str:
-    with TemporaryDirectory() as temp_dir:
-        path = os.path.join(temp_dir, "paper.pdf")
-        _download_file(pdf_url, path)
-        return extract_markdown_from_pdf(path)
+def _download_with_timeout(url: str, path: str, paper_title: str) -> bool:
+    return _run_with_hard_timeout(
+        _download_file,
+        (url, path),
+        timeout=FULL_TEXT_DOWNLOAD_TIMEOUT,
+        operation="Download",
+        paper_title=paper_title,
+    ) is not None
 
 
 def _extract_text_from_html_worker(html_url: str) -> str | None:
@@ -96,14 +144,11 @@ def _extract_text_from_html_worker(html_url: str) -> str | None:
     return text
 
 
-def _extract_text_from_tar_worker(source_url: str, paper_id: str, paper_title: str | None = None) -> str | None:
-    with TemporaryDirectory() as temp_dir:
-        path = os.path.join(temp_dir, "paper.tar.gz")
-        _download_file(source_url, path)
-        file_contents = extract_tex_code_from_tar(path, paper_id, paper_title=paper_title)
-        if not file_contents or "all" not in file_contents:
-            raise ValueError("Main tex file not found.")
-        return file_contents["all"]
+def _extract_text_from_tar_worker(path: str, paper_id: str, paper_title: str | None = None) -> str | None:
+    file_contents = extract_tex_code_from_tar(path, paper_id, paper_title=paper_title)
+    if not file_contents or "all" not in file_contents:
+        raise ValueError("Main tex file not found.")
+    return file_contents["all"]
 
 
 @register_retriever("arxiv")
@@ -112,60 +157,75 @@ class ArxivRetriever(BaseRetriever):
         super().__init__(config)
         if self.config.source.arxiv.category is None:
             raise ValueError("category must be specified for arxiv.")
+        self._api_available = True
+        self._full_text_available = True
+        self._full_text_failures = 0
 
     def _retrieve_raw_papers(self) -> list[ArxivResult]:
-        client = arxiv.Client(num_retries=10, delay_seconds=10)
         query = '+'.join(self.config.source.arxiv.category)
         include_cross_list = self.config.source.arxiv.get("include_cross_list", False)
         # Get the latest paper from arxiv rss feed
         feed = feedparser.parse(f"https://rss.arxiv.org/atom/{query}")
         if 'Feed error for query' in feed.feed.title:
             raise Exception(f"Invalid ARXIV_QUERY: {query}.")
-        raw_papers = []
         allowed_announce_types = {"new", "cross"} if include_cross_list else {"new"}
-        all_paper_ids = [
-            i.id.removeprefix("oai:arXiv.org:")
+        # The RSS feed carries all the metadata we need; the arXiv API is only used to fill gaps.
+        raw_papers = [
+            _rss_entry_to_result(i)
             for i in feed.entries
             if i.get("arxiv_announce_type", "new") in allowed_announce_types
         ]
         if self.config.executor.debug:
-            all_paper_ids = all_paper_ids[:10]
+            raw_papers = raw_papers[:10]
 
-        # Get full information of each paper from arxiv api
-        bar = tqdm(total=len(all_paper_ids))
-        max_batch_retries = 5
-        batch_retry_delay = 30
-        for i in range(0, len(all_paper_ids), 20):
-            search = arxiv.Search(id_list=all_paper_ids[i:i + 20])
-            for attempt in range(max_batch_retries):
-                try:
-                    batch = list(client.results(search))
-                    bar.update(len(batch))
-                    raw_papers.extend(batch)
-                    break
-                except arxiv.HTTPError as exc:
-                    if exc.status == 429 and attempt < max_batch_retries - 1:
-                        wait = batch_retry_delay * (attempt + 1)
-                        logger.warning(f"arXiv API 429 on batch {i // 20}, retry {attempt + 1}/{max_batch_retries} in {wait}s")
-                        sleep(wait)
-                    else:
-                        raise
-            if i + 20 < len(all_paper_ids):
-                sleep(3)
-        bar.close()
+        self._fill_missing_from_api(raw_papers)
 
-        return raw_papers
+        usable_papers = []
+        for paper in raw_papers:
+            missing = _missing_fields(paper)
+            if "title" in missing and "abstract" in missing:
+                logger.warning(f"Skipping {paper.get_short_id()}: neither title nor abstract is available")
+                continue
+            if missing:
+                logger.warning(f"{paper.get_short_id()} has no {', '.join(missing)}; continuing without it")
+            usable_papers.append(paper)
+        return usable_papers
+
+    def _fill_missing_from_api(self, raw_papers: list[ArxivResult]) -> None:
+        incomplete = {p.get_short_id(): p for p in raw_papers if _missing_fields(p)}
+        if not incomplete or not self._api_available:
+            return
+        logger.info(f"RSS metadata is incomplete for {len(incomplete)} papers, querying the arXiv API")
+        client = arxiv.Client(num_retries=1, delay_seconds=3)
+        paper_ids = list(incomplete)
+        for i in range(0, len(paper_ids), API_BATCH_SIZE):
+            search = arxiv.Search(id_list=paper_ids[i:i + API_BATCH_SIZE])
+            try:
+                api_papers = list(client.results(search))
+            except arxiv.HTTPError as exc:
+                if exc.status in API_BLOCKED_STATUSES:
+                    logger.warning(f"arXiv API returned HTTP {exc.status}; skipping it for the rest of this run and using RSS metadata only")
+                    self._api_available = False
+                    return
+                logger.warning(f"arXiv API returned HTTP {exc.status} for batch {i // API_BATCH_SIZE}; using RSS metadata for it")
+                continue
+            except Exception as exc:
+                logger.warning(f"arXiv API request failed for batch {i // API_BATCH_SIZE}: {exc}; using RSS metadata for it")
+                continue
+            for api_paper in api_papers:
+                paper = incomplete.get(api_paper.get_short_id())
+                if paper is None:
+                    continue
+                paper.title = paper.title or api_paper.title
+                paper.summary = paper.summary or api_paper.summary
+                paper.authors = paper.authors or api_paper.authors
 
     def convert_to_paper(self, raw_paper: ArxivResult) -> Paper:
         title = raw_paper.title
         authors = [a.name for a in raw_paper.authors]
         abstract = raw_paper.summary
         pdf_url = raw_paper.pdf_url
-        full_text = extract_text_from_tar(raw_paper)
-        if full_text is None:
-            full_text = extract_text_from_html(raw_paper)
-        if full_text is None:
-            full_text = extract_text_from_pdf(raw_paper)
+        full_text = self._extract_full_text(raw_paper) if self._full_text_available else None
         return Paper(
             source=self.name,
             title=title,
@@ -176,27 +236,54 @@ class ArxivRetriever(BaseRetriever):
             full_text=full_text,
         )
 
+    def _extract_full_text(self, raw_paper: ArxivResult) -> str | None:
+        # Full text is optional: without it, the TL;DR is generated from the abstract.
+        for extract in (extract_text_from_tar, extract_text_from_html, extract_text_from_pdf):
+            try:
+                full_text = extract(raw_paper)
+            except Exception as exc:
+                logger.warning(f"Full-text extraction failed for {raw_paper.title}: {exc}")
+                continue
+            if full_text is not None:
+                self._full_text_failures = 0
+                return full_text
+        self._full_text_failures += 1
+        if self._full_text_failures >= FULL_TEXT_MAX_CONSECUTIVE_FAILURES:
+            logger.warning(
+                f"No full text for {self._full_text_failures} papers in a row; "
+                "skipping full-text downloads for the rest of this run and using abstracts instead"
+            )
+            self._full_text_available = False
+        return None
+
 
 def extract_text_from_html(paper: ArxivResult) -> str | None:
     html_url = paper.entry_id.replace("/abs/", "/html/")
-    try:
-        return _extract_text_from_html_worker(html_url)
-    except Exception as exc:
-        logger.warning(f"HTML extraction failed for {paper.title}: {exc}")
-        return None
+    # Fetching dominates; trafilatura's parse takes well under a second, so it shares the download limit.
+    return _run_with_hard_timeout(
+        _extract_text_from_html_worker,
+        (html_url,),
+        timeout=FULL_TEXT_DOWNLOAD_TIMEOUT,
+        operation="HTML extraction",
+        paper_title=paper.title,
+    )
 
 
 def extract_text_from_pdf(paper: ArxivResult) -> str | None:
     if paper.pdf_url is None:
         logger.warning(f"No PDF URL available for {paper.title}")
         return None
-    return _run_with_hard_timeout(
-        _extract_text_from_pdf_worker,
-        (paper.pdf_url,),
-        timeout=PDF_EXTRACT_TIMEOUT,
-        operation="PDF extraction",
-        paper_title=paper.title,
-    )
+    with TemporaryDirectory() as temp_dir:
+        path = os.path.join(temp_dir, "paper.pdf")
+        if not _download_with_timeout(paper.pdf_url, path, paper.title):
+            return None
+        return _run_with_hard_timeout(
+            extract_markdown_from_pdf,
+            (path,),
+            timeout=PDF_EXTRACT_TIMEOUT,
+            operation="PDF extraction",
+            paper_title=paper.title,
+        )
 
 
 def extract_text_from_tar(paper: ArxivResult) -> str | None:
@@ -204,10 +291,14 @@ def extract_text_from_tar(paper: ArxivResult) -> str | None:
     if source_url is None:
         logger.warning(f"No source URL available for {paper.title}")
         return None
-    return _run_with_hard_timeout(
-        _extract_text_from_tar_worker,
-        (source_url, paper.entry_id, paper.title),
-        timeout=TAR_EXTRACT_TIMEOUT,
-        operation="Tar extraction",
-        paper_title=paper.title,
-    )
+    with TemporaryDirectory() as temp_dir:
+        path = os.path.join(temp_dir, "paper.tar.gz")
+        if not _download_with_timeout(source_url, path, paper.title):
+            return None
+        return _run_with_hard_timeout(
+            _extract_text_from_tar_worker,
+            (path, paper.entry_id, paper.title),
+            timeout=TAR_EXTRACT_TIMEOUT,
+            operation="Tar extraction",
+            paper_title=paper.title,
+        )
