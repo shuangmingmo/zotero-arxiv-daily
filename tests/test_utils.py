@@ -133,6 +133,29 @@ def test_send_email_starttls_success(config, monkeypatch):
     assert "text/html" in body
 
 
+def _sent_subject(raw_message: str) -> str:
+    import email
+    from email.header import decode_header, make_header
+
+    return str(make_header(decode_header(email.message_from_string(raw_message)["Subject"])))
+
+
+def test_send_email_subject_without_tags(config, monkeypatch):
+    sent = []
+    monkeypatch.setattr(smtplib, "SMTP", make_stub_smtp(sent))
+    send_email(config, "<html>hello</html>")
+    subject = _sent_subject(sent[0][2])
+    assert subject.startswith("Daily arXiv ")
+    assert "[" not in subject
+
+
+def test_send_email_subject_with_tags(config, monkeypatch):
+    sent = []
+    monkeypatch.setattr(smtplib, "SMTP", make_stub_smtp(sent))
+    send_email(config, "<html>hello</html>", ["API blocked", "abstract-only"])
+    assert _sent_subject(sent[0][2]).endswith(" [API blocked] [abstract-only]")
+
+
 def test_send_email_falls_back_to_ssl(config, monkeypatch):
     sent = []
     call_count = {"smtp": 0}

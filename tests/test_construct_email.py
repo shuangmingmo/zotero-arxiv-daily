@@ -47,6 +47,34 @@ def test_render_email_no_affiliations():
     assert "Unknown Affiliation" in html
 
 
+def test_render_email_shows_run_notes():
+    notes = ["arXiv: 2 papers, metadata from the RSS feed; arXiv API not needed.", "arXiv full text: 2 of 2 papers."]
+    html = render_email([make_sample_paper(score=7.0, tldr="ok")], notes)
+    assert "Run details" in html
+    assert all(note in html for note in notes)
+    assert html.index("Run details") < html.index("To unsubscribe")
+
+
+def test_render_email_empty_list_shows_run_notes():
+    html = render_email([], ["arXiv: 0 papers, metadata from the RSS feed; arXiv API not needed."])
+    assert "No Papers Today" in html
+    assert "arXiv: 0 papers" in html
+
+
+def test_render_email_without_run_notes_has_no_footer():
+    assert "Run details" not in render_email([make_sample_paper(score=7.0, tldr="ok")])
+    assert "__RUN_NOTES__" not in render_email([])
+
+
+def test_render_email_marks_arxiv_tldr_written_from_abstract():
+    from_abstract = make_sample_paper(title="No full text", score=7.0, tldr="tldr A", full_text=None)
+    with_full_text = make_sample_paper(title="Has full text", score=7.0, tldr="tldr B")
+    biorxiv = make_sample_paper(title="bioRxiv paper", source="biorxiv", score=7.0, tldr="tldr C", full_text=None)
+    html = render_email([from_abstract, with_full_text, biorxiv])
+    assert html.count("(from abstract)") == 1
+    assert "tldr A <i" in html
+
+
 def test_get_stars_low_score():
     assert get_stars(5.0) == ""
     assert get_stars(6.0) == ""

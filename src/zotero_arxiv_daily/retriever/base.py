@@ -36,6 +36,14 @@ class BaseRetriever(ABC):
             sleep(1)
         return papers
 
+    def run_notes(self) -> list[str]:
+        """Lines describing how this run's papers were retrieved, shown at the bottom of the email."""
+        return []
+
+    def subject_tags(self) -> list[str]:
+        """Short markers appended to the email subject when this run was degraded."""
+        return []
+
 registered_retrievers = {}
 
 def register_retriever(name:str):

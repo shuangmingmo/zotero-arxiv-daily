@@ -65,6 +65,10 @@ def _missing_fields(paper: ArxivResult) -> list[str]:
     return [name for name, value in fields.items() if not value]
 
 
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
 def _download_file(url: str, path: str) -> str:
     with requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT) as response:
         response.raise_for_status()
@@ -157,9 +161,15 @@ class ArxivRetriever(BaseRetriever):
         super().__init__(config)
         if self.config.source.arxiv.category is None:
             raise ValueError("category must be specified for arxiv.")
-        self._api_available = True
+        # Run state, reported in the email via run_notes() and subject_tags().
+        self._paper_count = None  # stays None until the RSS feed has been processed
+        self._api_blocked_status = None
+        self._api_filled = 0
+        self._api_failed_requests = 0
         self._full_text_available = True
         self._full_text_failures = 0
+        self._full_text_found = 0
+        self._full_text_missing = 0
 
     def _retrieve_raw_papers(self) -> list[ArxivResult]:
         query = '+'.join(self.config.source.arxiv.category)
@@ -189,11 +199,12 @@ class ArxivRetriever(BaseRetriever):
             if missing:
                 logger.warning(f"{paper.get_short_id()} has no {', '.join(missing)}; continuing without it")
             usable_papers.append(paper)
+        self._paper_count = len(usable_papers)
         return usable_papers
 
     def _fill_missing_from_api(self, raw_papers: list[ArxivResult]) -> None:
         incomplete = {p.get_short_id(): p for p in raw_papers if _missing_fields(p)}
-        if not incomplete or not self._api_available:
+        if not incomplete or self._api_blocked_status is not None:
             return
         logger.info(f"RSS metadata is incomplete for {len(incomplete)} papers, querying the arXiv API")
         client = arxiv.Client(num_retries=1, delay_seconds=3)
@@ -205,12 +216,14 @@ class ArxivRetriever(BaseRetriever):
             except arxiv.HTTPError as exc:
                 if exc.status in API_BLOCKED_STATUSES:
                     logger.warning(f"arXiv API returned HTTP {exc.status}; skipping it for the rest of this run and using RSS metadata only")
-                    self._api_available = False
+                    self._api_blocked_status = exc.status
                     return
                 logger.warning(f"arXiv API returned HTTP {exc.status} for batch {i // API_BATCH_SIZE}; using RSS metadata for it")
+                self._api_failed_requests += 1
                 continue
             except Exception as exc:
                 logger.warning(f"arXiv API request failed for batch {i // API_BATCH_SIZE}: {exc}; using RSS metadata for it")
+                self._api_failed_requests += 1
                 continue
             for api_paper in api_papers:
                 paper = incomplete.get(api_paper.get_short_id())
@@ -219,6 +232,38 @@ class ArxivRetriever(BaseRetriever):
                 paper.title = paper.title or api_paper.title
                 paper.summary = paper.summary or api_paper.summary
                 paper.authors = paper.authors or api_paper.authors
+                self._api_filled += 1
+
+    def run_notes(self) -> list[str]:
+        if self._paper_count is None:
+            return []
+        api_notes = []
+        if self._api_filled:
+            api_notes.append(f"arXiv API filled missing fields for {_count(self._api_filled, 'paper')}")
+        if self._api_failed_requests:
+            api_notes.append(f"arXiv API failed for {_count(self._api_failed_requests, 'request')}")
+        if self._api_blocked_status is not None:
+            api_notes.append(f"arXiv API blocked (HTTP {self._api_blocked_status}) and skipped")
+        api = "; ".join(api_notes) or "arXiv API not needed"
+        notes = [f"arXiv: {_count(self._paper_count, 'paper')}, metadata from the RSS feed; {api}."]
+        total = self._full_text_found + self._full_text_missing
+        if total:
+            full_text = f"arXiv full text: {self._full_text_found} of {_count(total, 'paper')}"
+            if not self._full_text_available:
+                full_text += (
+                    f"; downloads stopped after {FULL_TEXT_MAX_CONSECUTIVE_FAILURES} papers in a row failed, "
+                    "the rest used abstracts"
+                )
+            notes.append(f"{full_text}.")
+        return notes
+
+    def subject_tags(self) -> list[str]:
+        tags = []
+        if self._api_blocked_status is not None:
+            tags.append("API blocked")
+        if not self._full_text_available:
+            tags.append("abstract-only")
+        return tags
 
     def convert_to_paper(self, raw_paper: ArxivResult) -> Paper:
         title = raw_paper.title
@@ -226,6 +271,10 @@ class ArxivRetriever(BaseRetriever):
         abstract = raw_paper.summary
         pdf_url = raw_paper.pdf_url
         full_text = self._extract_full_text(raw_paper) if self._full_text_available else None
+        if full_text is None:
+            self._full_text_missing += 1
+        else:
+            self._full_text_found += 1
         return Paper(
             source=self.name,
             title=title,

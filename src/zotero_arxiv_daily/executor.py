@@ -118,7 +118,11 @@ class Executor:
         elif not self.config.executor.send_empty:
             logger.info("No new papers found. No email will be sent.")
             return
+        run_notes = [note for r in self.retrievers.values() for note in r.run_notes()]
+        subject_tags = [tag for r in self.retrievers.values() for tag in r.subject_tags()]
+        for note in run_notes:
+            logger.info(f"Run details: {note}")
         logger.info("Sending email...")
-        email_content = render_email(reranked_papers)
-        send_email(self.config, email_content)
+        email_content = render_email(reranked_papers, run_notes)
+        send_email(self.config, email_content, subject_tags)
         logger.info("Email sent successfully")

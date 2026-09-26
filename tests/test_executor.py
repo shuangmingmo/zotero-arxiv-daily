@@ -191,6 +191,9 @@ def test_run_end_to_end(config, monkeypatch):
         "retrieve_papers",
         lambda self: retrieved,
     )
+    run_note = "arXiv: 2 papers, metadata from the RSS feed; arXiv API blocked (HTTP 406) and skipped."
+    monkeypatch.setattr(registered_retrievers["arxiv"], "run_notes", lambda self: [run_note])
+    monkeypatch.setattr(registered_retrievers["arxiv"], "subject_tags", lambda self: ["API blocked"])
 
     # 4. Stub SMTP
     sent = []
@@ -207,6 +210,14 @@ def test_run_end_to_end(config, monkeypatch):
     assert len(sent) == 1, "Email should have been sent"
     _, _, email_body = sent[0]
     assert "text/html" in email_body
+
+    # Retrieval details reach the email footer and subject.
+    import email
+    from email.header import decode_header, make_header
+
+    message = email.message_from_string(email_body)
+    assert str(make_header(decode_header(message["Subject"]))).endswith(" [API blocked]")
+    assert run_note in message.get_payload(decode=True).decode("utf-8")
 
 
 def test_run_no_papers_send_empty_false(config, monkeypatch):

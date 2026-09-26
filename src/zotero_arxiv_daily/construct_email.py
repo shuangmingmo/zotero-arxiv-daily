@@ -30,7 +30,7 @@ framework = """
 <div>
     __CONTENT__
 </div>
-
+__RUN_NOTES__
 <br><br>
 <div>
 To unsubscribe, remove your email in your Github Action setting.
@@ -87,6 +87,17 @@ def get_block_html(title:str, authors:str, rate:str, tldr:str, pdf_url:str, affi
 """
     return block_template.format(title=title, authors=authors,rate=rate, tldr=tldr, pdf_url=pdf_url, affiliations=affiliations)
 
+def get_run_notes_html(run_notes:list[str]) -> str:
+    if not run_notes:
+        return ''
+    return f"""
+<br><br>
+<div style="font-family: Arial, sans-serif; font-size: 12px; color: #888;">
+    <strong>Run details</strong><br>
+    {'<br>'.join(run_notes)}
+</div>
+"""
+
 def get_stars(score:float):
     full_star = '<span class="full-star">⭐</span>'
     half_star = '<span class="half-star">⭐</span>'
@@ -104,11 +115,12 @@ def get_stars(score:float):
         return '<div class="star-wrapper">'+full_star * full_star_num + half_star * half_star_num + '</div>'
 
 
-def render_email(papers:list[Paper]) -> str:
+def render_email(papers:list[Paper], run_notes:list[str]|None=None) -> str:
     parts = []
+    page = framework.replace('__RUN_NOTES__', get_run_notes_html(run_notes or []))
     if len(papers) == 0 :
-        return framework.replace('__CONTENT__', get_empty_html())
-    
+        return page.replace('__CONTENT__', get_empty_html())
+
     for p in papers:
         #rate = get_stars(p.score)
         rate = round(p.score, 1) if p.score is not None else 'Unknown'
@@ -125,7 +137,11 @@ def render_email(papers:list[Paper]) -> str:
                 affiliations += ', ...'
         else:
             affiliations = 'Unknown Affiliation'
-        parts.append(get_block_html(p.title, authors, rate, p.tldr, p.pdf_url, affiliations))
+        tldr = p.tldr
+        # arXiv papers normally get a TL;DR from full text; flag the ones written from the abstract only.
+        if p.source == 'arxiv' and p.full_text is None:
+            tldr = f'{tldr} <i style="color: #888;">(from abstract)</i>'
+        parts.append(get_block_html(p.title, authors, rate, tldr, p.pdf_url, affiliations))
 
     content = '<br>' + '</br><br>'.join(parts) + '</br>'
-    return framework.replace('__CONTENT__', content)
+    return page.replace('__CONTENT__', content)

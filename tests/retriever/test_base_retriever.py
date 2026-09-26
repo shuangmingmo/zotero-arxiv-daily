@@ -121,6 +121,14 @@ def test_retrieve_papers_empty_raw(config, monkeypatch):
     assert papers == []
 
 
+def test_run_notes_and_subject_tags_default_to_empty(config):
+    with open_dict(config.source):
+        config.source.none_test = {}
+    retriever = NoneRetriever(config)
+    assert retriever.run_notes() == []
+    assert retriever.subject_tags() == []
+
+
 def test_get_retriever_cls_unknown():
     import pytest
     with pytest.raises(ValueError, match="not found"):

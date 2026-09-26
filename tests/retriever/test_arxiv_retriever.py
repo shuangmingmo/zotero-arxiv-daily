@@ -62,8 +62,10 @@ def test_arxiv_retriever_builds_papers_from_rss_without_api(config, mock_feedpar
 
     _patch_api(monkeypatch, fail)
     new_entries = _new_entries(mock_feedparser)
+    retriever = ArxivRetriever(config)
+    assert retriever.run_notes() == []  # nothing to report before retrieval runs
 
-    papers = ArxivRetriever(config).retrieve_papers()
+    papers = retriever.retrieve_papers()
 
     assert [p.title for p in papers] == [e.title for e in new_entries]
     paper = papers[0]
@@ -71,6 +73,11 @@ def test_arxiv_retriever_builds_papers_from_rss_without_api(config, mock_feedpar
     assert paper.abstract.startswith("We propose a neural architecture search")
     assert paper.url == "https://arxiv.org/abs/2508.14001v1"
     assert paper.pdf_url == "https://arxiv.org/pdf/2508.14001v1"
+    assert retriever.run_notes() == [
+        "arXiv: 2 papers, metadata from the RSS feed; arXiv API not needed.",
+        "arXiv full text: 0 of 2 papers.",
+    ]
+    assert retriever.subject_tags() == []
 
 
 @pytest.mark.parametrize("status", [403, 406, 429, 503])
@@ -88,12 +95,15 @@ def test_arxiv_retriever_survives_blocked_api(config, mock_feedparser, monkeypat
     warnings: list[str] = []
     monkeypatch.setattr(arxiv_retriever, "logger", SimpleNamespace(warning=warnings.append, info=lambda msg: None))
 
-    papers = ArxivRetriever(config).retrieve_papers()
+    retriever = ArxivRetriever(config)
+    papers = retriever.retrieve_papers()
 
     assert [p.title for p in papers] == [e.title for e in new_entries]
     assert all(p.abstract for p in papers)
     assert len(searches) == 1  # the API is skipped for the rest of the run after the first block
     assert any(f"HTTP {status}" in w for w in warnings)
+    assert f"arXiv API blocked (HTTP {status}) and skipped" in retriever.run_notes()[0]
+    assert retriever.subject_tags() == ["API blocked"]
 
 
 def test_arxiv_retriever_fills_missing_fields_from_api(config, mock_feedparser, monkeypatch, no_downloads):
@@ -107,13 +117,18 @@ def test_arxiv_retriever_fills_missing_fields_from_api(config, mock_feedparser, 
     )
     searches = _patch_api(monkeypatch, lambda search: iter([api_paper]))
 
-    papers = ArxivRetriever(config).retrieve_papers()
+    retriever = ArxivRetriever(config)
+    papers = retriever.retrieve_papers()
 
     assert searches[0].id_list == ["2508.14001v1"]
     assert papers[0].abstract == "Abstract from API"
     # Fields the RSS feed already provided are kept.
     assert papers[0].title == new_entries[0].title
     assert papers[0].authors == ["Alice Smith", "Bob Jones"]
+    assert retriever.run_notes()[0] == (
+        "arXiv: 2 papers, metadata from the RSS feed; arXiv API filled missing fields for 1 paper."
+    )
+    assert retriever.subject_tags() == []
 
 
 def test_arxiv_retriever_uses_abstract_when_full_text_fails(config, mock_feedparser, monkeypatch, no_downloads):
@@ -156,7 +171,8 @@ def test_arxiv_retriever_stops_full_text_after_consecutive_failures(config, mock
     warnings: list[str] = []
     monkeypatch.setattr(arxiv_retriever, "logger", SimpleNamespace(warning=warnings.append, info=lambda msg: None))
 
-    papers = ArxivRetriever(config).retrieve_papers()
+    retriever = ArxivRetriever(config)
+    papers = retriever.retrieve_papers()
 
     # fail, fail, success (reset), fail, fail, fail -> stop; the 7th paper is not downloaded.
     assert attempts == [e.title for e in entries[:6]]
@@ -164,6 +180,10 @@ def test_arxiv_retriever_stops_full_text_after_consecutive_failures(config, mock
     assert [p.title for p in papers] == [e.title for e in entries]
     assert all(p.abstract for p in papers)
     assert sum("rest of this run" in w for w in warnings) == 1
+    assert retriever.run_notes()[1] == (
+        "arXiv full text: 1 of 7 papers; downloads stopped after 3 papers in a row failed, the rest used abstracts."
+    )
+    assert retriever.subject_tags() == ["abstract-only"]
 
 
 @pytest.mark.parametrize(
