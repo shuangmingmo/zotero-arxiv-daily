@@ -1,4 +1,6 @@
 from .protocol import Paper
+from .text_format import tex_to_html
+import html
 import math
 
 
@@ -124,7 +126,7 @@ def render_email(papers:list[Paper], run_notes:list[str]|None=None) -> str:
     for p in papers:
         #rate = get_stars(p.score)
         rate = round(p.score, 1) if p.score is not None else 'Unknown'
-        author_list = [a for a in p.authors]
+        author_list = [html.escape(a) for a in p.authors]
         num_authors = len(author_list)
         if num_authors <= 5:
             authors = ', '.join(author_list)
@@ -133,16 +135,18 @@ def render_email(papers:list[Paper], run_notes:list[str]|None=None) -> str:
         # None (not extracted) and [] (none found) both show the placeholder, never an empty line.
         if p.affiliations:
             affiliations = p.affiliations[:5]
-            affiliations = ', '.join(affiliations)
+            affiliations = ', '.join(html.escape(a) for a in affiliations)
             if len(p.affiliations) > 5:
                 affiliations += ', ...'
         else:
             affiliations = 'Unknown Affiliation'
-        tldr = p.tldr
+        # Titles are arXiv TeX and TL;DRs are LLM Markdown with LaTeX math; email shows neither as written.
+        title = tex_to_html(p.title)
+        tldr = tex_to_html(p.tldr, markdown=True)
         # arXiv papers normally get a TL;DR from full text; flag the ones written from the abstract only.
         if p.source == 'arxiv' and p.full_text is None:
             tldr = f'{tldr} <i style="color: #888;">(from abstract)</i>'
-        parts.append(get_block_html(p.title, authors, rate, tldr, p.pdf_url, affiliations))
+        parts.append(get_block_html(title, authors, rate, tldr, p.pdf_url, affiliations))
 
     content = '<br>' + '</br><br>'.join(parts) + '</br>'
     return page.replace('__CONTENT__', content)

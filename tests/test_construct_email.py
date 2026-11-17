@@ -33,6 +33,21 @@ def test_render_email_author_truncation():
     assert "Author 5" not in html
 
 
+def test_render_email_converts_latex_and_markdown():
+    paper = make_sample_paper(
+        title=r"The $\mathbb{Z}_2$ twist defect",
+        authors=["Jiří Novotný", "A <B> & C"],
+        affiliations=["Texas A&M University"],
+        tldr=r"New **sum rules** for \(\alpha'\)-completions.",
+        score=7.0,
+    )
+    html = render_email([paper])
+    assert "The ℤ<sub>2</sub> twist defect" in html
+    assert "Jiří Novotný, A &lt;B&gt; &amp; C" in html
+    assert "Texas A&amp;M University" in html
+    assert "New <b>sum rules</b> for α'-completions." in html
+
+
 @pytest.mark.parametrize("affiliations", [None, []])
 def test_render_email_missing_affiliation_shows_placeholder(affiliations):
     paper = make_sample_paper(affiliations=affiliations, score=7.0, tldr="ok")

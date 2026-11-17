@@ -2,6 +2,7 @@ from .base import BaseRetriever, register_retriever
 import arxiv
 from arxiv import Result as ArxivResult
 from ..protocol import Paper
+from ..text_format import latex_to_unicode
 from ..utils import extract_markdown_from_pdf, extract_tex_code_from_tar
 from tempfile import TemporaryDirectory
 import feedparser
@@ -267,7 +268,8 @@ class ArxivRetriever(BaseRetriever):
 
     def convert_to_paper(self, raw_paper: ArxivResult) -> Paper:
         title = raw_paper.title
-        authors = [a.name for a in raw_paper.authors]
+        # arXiv author names are TeX ("Ji\v{r}\'i"); keep them as plain Unicode ("Jiří").
+        authors = [latex_to_unicode(a.name) for a in raw_paper.authors]
         abstract = raw_paper.summary
         pdf_url = raw_paper.pdf_url
         full_text = self._extract_full_text(raw_paper) if self._full_text_available else None

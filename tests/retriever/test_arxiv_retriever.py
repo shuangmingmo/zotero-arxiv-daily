@@ -211,6 +211,17 @@ def test_full_text_download_is_time_limited(monkeypatch, extractor, slow_step):
     assert "timed out" in warnings[0]
 
 
+def test_convert_to_paper_turns_tex_author_names_into_unicode(config, no_downloads):
+    raw = arxiv.Result(
+        entry_id="https://arxiv.org/abs/2611.18836v1",
+        title="Quadratic Sum Rules for Scalar Amplitudes",
+        authors=[arxiv.Result.Author(name) for name in _split_rss_authors(r"Karol Kampf, Ji\v{r}\'i Novotn\'y, David Podiv\'in")],
+        summary="Abstract.",
+    )
+    paper = ArxivRetriever(config).convert_to_paper(raw)
+    assert paper.authors == ["Karol Kampf", "Jiří Novotný", "David Podivín"]
+
+
 def test_split_rss_authors_drops_affiliations():
     creator = "Anthony Bertrand (UCA, LIMOS), Tom Schmitt (UCA),  Engelbert Mephu Nguifo"
     assert _split_rss_authors(creator) == ["Anthony Bertrand", "Tom Schmitt", "Engelbert Mephu Nguifo"]
