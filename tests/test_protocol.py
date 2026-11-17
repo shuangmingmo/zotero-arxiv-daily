@@ -108,14 +108,64 @@ def test_affiliations_none_without_fulltext(llm_params):
     assert result is None
 
 
-def test_affiliations_deduplicates(llm_params):
-    """The stub returns two distinct affiliations, so no dedup needed.
-    But confirm the set() dedup in the code doesn't break anything.
-    """
-    client = make_stub_openai_client()
+def _recording_client(response: str):
+    """Chat-completion client that returns `response` and records the messages it was sent."""
+    from types import SimpleNamespace
+
+    sent = []
+
+    def create(**kwargs):
+        sent.append(kwargs["messages"])
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=response))])
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))), sent
+
+
+def test_affiliations_keep_author_order_and_drop_repeats(llm_params):
+    client, _ = _recording_client('["Univ B", "Univ A", "Univ B", " ", "Univ C"]')
     paper = make_sample_paper()
-    result = paper.generate_affiliations(client, llm_params)
-    assert len(result) == len(set(result))
+    assert paper.generate_affiliations(client, llm_params) == ["Univ B", "Univ A", "Univ C"]
+
+
+def test_affiliations_prompt_starts_at_author_block_after_long_preamble(llm_params):
+    # A preamble far longer than the prompt limit, including a macro *definition* named like an
+    # author command, which must not be mistaken for the author block.
+    preamble = "\\newcommand{\\address}[1]{#1}\n" + "".join(
+        f"\\newcommand{{\\macro{i}}}{{\\mathcal{{O}}_{{{i}}}}}\n" for i in range(1500)
+    )
+    full_text = (
+        "\\documentclass{article}\n" + preamble
+        + "\\author{Aleksandr Artemev}\n"
+        + "\\affiliation{Institute for Theoretical Physics, University of Amsterdam}\n"
+        + "\\begin{document}\n\\maketitle\nBody.\n\\end{document}"
+    )
+    client, sent = _recording_client('["University of Amsterdam"]')
+    paper = make_sample_paper(full_text=full_text)
+
+    assert paper.generate_affiliations(client, llm_params) == ["University of Amsterdam"]
+    system, user = sent[0]
+    assert system["content"].startswith("You are an assistant who perfectly extracts affiliations")
+    assert "\\affiliation{Institute for Theoretical Physics, University of Amsterdam}" in user["content"]
+    assert "\\newcommand" not in user["content"]
+
+
+@pytest.mark.parametrize(
+    ("full_text", "expected_start"),
+    [
+        # JHEP style: \author[a]{...}
+        ("\\usepackage{x}\n\\author[a]{A}\n\\affiliation[a]{U}", "\\author[a]{A}"),
+        # amsart style: \address after \begin{document}
+        ("\\newcommand{\\author}{}\n\\begin{document}\n\\address{U}", "\\address{U}"),
+        # No author commands: start at the document body.
+        ("\\usepackage{x}\n\\begin{document}\nText", "\\begin{document}"),
+        # Text from HTML or PDF: unchanged.
+        ("Title\nA. Author (University)\nAbstract ...", "Title"),
+    ],
+)
+def test_affiliation_context_start(full_text, expected_start):
+    from zotero_arxiv_daily.protocol import _affiliation_context
+
+    assert _affiliation_context(full_text).startswith(expected_start)
 
 
 def test_affiliations_malformed_llm_output(llm_params):

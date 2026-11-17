@@ -1,5 +1,7 @@
 """Tests for zotero_arxiv_daily.construct_email: render_email, get_stars, get_block_html."""
 
+import pytest
+
 from zotero_arxiv_daily.construct_email import render_email, get_stars, get_block_html, get_empty_html
 from tests.canned_responses import make_sample_paper
 
@@ -29,6 +31,13 @@ def test_render_email_author_truncation():
     assert "Author 9" in html
     # Middle authors should be truncated
     assert "Author 5" not in html
+
+
+@pytest.mark.parametrize("affiliations", [None, []])
+def test_render_email_missing_affiliation_shows_placeholder(affiliations):
+    paper = make_sample_paper(affiliations=affiliations, score=7.0, tldr="ok")
+    html = render_email([paper])
+    assert "<i>Unknown Affiliation</i>" in html
 
 
 def test_render_email_affiliation_truncation():

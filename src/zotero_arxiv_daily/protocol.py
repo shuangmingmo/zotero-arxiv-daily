@@ -8,6 +8,38 @@ from loguru import logger
 import json
 RawPaperItem = TypeVar('RawPaperItem')
 
+AFFILIATION_PROMPT_TOKENS = 2000
+# The author block of a LaTeX source: the first \author, \affiliation, ... call (a name followed by
+# an argument, so macro definitions such as \newcommand{\address} are skipped), else \begin{document}.
+_TEX_AUTHOR_BLOCK = re.compile(r'\\(?:author|affiliation|affil|institute|address)\s*[\[{]')
+_TEX_DOCUMENT_START = re.compile(r'\\begin\{document\}')
+
+AFFILIATION_SYSTEM_PROMPT = (
+    "You are an assistant who perfectly extracts affiliations of authors from a paper. "
+    "Return a JSON list of the authors' institutions in author order, like "
+    "[\"Charles University\", \"University of Amsterdam\"]. "
+    "Give only the name of the top-level institution: leave out departments, groups, and institutes "
+    "or centres that belong to a university, and leave out street addresses, postcodes, cities and countries. "
+    "An institution that is not part of a university keeps its own name. "
+    "Examples: "
+    "'Institute for Particle and Nuclear Physics, Charles University, Prague, Czech Republic' -> \"Charles University\"; "
+    "'Institute for Theoretical Physics, University of Amsterdam, Science Park 904, 1098 XH Amsterdam, The Netherlands' -> \"University of Amsterdam\"; "
+    "'Theoretical Physics Department, CERN, 1211 Geneva 23, Switzerland' -> \"CERN\"; "
+    "'Perimeter Institute for Theoretical Physics, Waterloo, Ontario, Canada' -> \"Perimeter Institute for Theoretical Physics\". "
+    "Write names as plain text without LaTeX, and list each institution once. "
+    "If there is no affiliation, return an empty list []. Return only the list, with no other text."
+)
+
+
+def _affiliation_context(full_text: str) -> str:
+    """Start the text sent for affiliation extraction at the author block.
+
+    For LaTeX sources the preamble (packages, macros, TikZ styles) can run to thousands of
+    tokens, which pushed the authors and affiliations out of the truncated prompt.
+    """
+    match = _TEX_AUTHOR_BLOCK.search(full_text) or _TEX_DOCUMENT_START.search(full_text)
+    return full_text[match.start():] if match else full_text
+
 
 def _request_llm(openai_client: OpenAI, llm_params: dict, messages: list[dict]) -> str:
     api_mode = llm_params.get("api_mode", "chat_completion")
@@ -97,28 +129,26 @@ class Paper:
 
     def _generate_affiliations_with_llm(self, openai_client:OpenAI,llm_params:dict) -> Optional[list[str]]:
         if self.full_text is not None:
-            prompt = f"Given the beginning of a paper, extract the affiliations of the authors in a python list format, which is sorted by the author order. If there is no affiliation found, return an empty list '[]':\n\n{self.full_text}"
+            prompt = f"Given the beginning of a paper, extract the affiliations of the authors as a JSON list in author order. If there is no affiliation found, return an empty list '[]':\n\n{_affiliation_context(self.full_text)}"
             # use gpt-4o tokenizer for estimation
             enc = tiktoken.encoding_for_model("gpt-4o")
             prompt_tokens = enc.encode(prompt)
-            prompt_tokens = prompt_tokens[:2000]  # truncate to 2000 tokens
+            prompt_tokens = prompt_tokens[:AFFILIATION_PROMPT_TOKENS]
             prompt = enc.decode(prompt_tokens)
             affiliations = _request_llm(
                 openai_client,
                 llm_params,
                 [
-                    {
-                        "role": "system",
-                        "content": "You are an assistant who perfectly extracts affiliations of authors from a paper. You should return a python list of affiliations sorted by the author order, like [\"TsingHua University\",\"Peking University\"]. If an affiliation is consisted of multi-level affiliations, like 'Department of Computer Science, TsingHua University', you should return the top-level affiliation 'TsingHua University' only. Do not contain duplicated affiliations. If there is no affiliation found, you should return an empty list [ ]. You should only return the final list of affiliations, and do not return any intermediate results.",
-                    },
+                    {"role": "system", "content": AFFILIATION_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
             )
 
             affiliations = re.search(r'\[.*?\]', affiliations, flags=re.DOTALL).group(0)
             affiliations = json.loads(affiliations)
-            affiliations = list(set(affiliations))
-            affiliations = [str(a) for a in affiliations]
+            # Drop blanks and repeats but keep author order (a set would shuffle it).
+            affiliations = [str(a).strip() for a in affiliations]
+            affiliations = list(dict.fromkeys(a for a in affiliations if a))
 
             return affiliations
     

@@ -130,7 +130,8 @@ def render_email(papers:list[Paper], run_notes:list[str]|None=None) -> str:
             authors = ', '.join(author_list)
         else:
             authors = ', '.join(author_list[:3] + ['...'] + author_list[-2:])
-        if p.affiliations is not None:
+        # None (not extracted) and [] (none found) both show the placeholder, never an empty line.
+        if p.affiliations:
             affiliations = p.affiliations[:5]
             affiliations = ', '.join(affiliations)
             if len(p.affiliations) > 5:
