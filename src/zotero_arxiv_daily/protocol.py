@@ -6,7 +6,7 @@ import tiktoken
 from openai import OpenAI
 from loguru import logger
 import json
-from .text_format import latex_to_unicode
+from .text_format import latex_accents_to_unicode, latex_to_unicode
 RawPaperItem = TypeVar('RawPaperItem')
 
 AFFILIATION_PROMPT_TOKENS = 2000
@@ -33,13 +33,16 @@ AFFILIATION_SYSTEM_PROMPT = (
 
 
 def _affiliation_context(full_text: str) -> str:
-    """Start the text sent for affiliation extraction at the author block.
+    """The text sent for affiliation extraction: from the author block on, with accents as letters.
 
     For LaTeX sources the preamble (packages, macros, TikZ styles) can run to thousands of
     tokens, which pushed the authors and affiliations out of the truncated prompt.
+    Accents are converted first because the model mangles them otherwise: it copied
+    Th\\'eorique into its JSON and turned Universit\\"at into "Universiti¿½t".
     """
     match = _TEX_AUTHOR_BLOCK.search(full_text) or _TEX_DOCUMENT_START.search(full_text)
-    return full_text[match.start():] if match else full_text
+    text = full_text[match.start():] if match else full_text
+    return latex_accents_to_unicode(text)
 
 
 def _request_llm(openai_client: OpenAI, llm_params: dict, messages: list[dict]) -> str:

@@ -2,7 +2,30 @@
 
 import pytest
 
-from zotero_arxiv_daily.text_format import latex_to_unicode, tex_to_html
+from zotero_arxiv_daily.text_format import latex_accents_to_unicode, latex_to_unicode, tex_to_html
+
+
+@pytest.mark.parametrize(
+    ("tex", "expected"),
+    [
+        (r"Bergische Universit\"at Wuppertal", "Bergische Universität Wuppertal"),
+        (r"Universit\"{a}t", "Universität"),
+        (r"Physique Th\'eorique", "Physique Théorique"),
+        (r"Ji\v{r}\'i", "Jiří"),
+        (r"Ba\u{g}c{\i}", "Bağcı"),
+        (r"Fran\c{c}ois and \c c", "François and ç"),
+        (r"{\O}ystein, Pawe\l{} and {\aa}", "Øystein, Paweł and å"),
+        (r"Gau\ss stra\ss e 20", "Gaußstraße 20"),
+        (r"Mar\'{\i}a and Nu\~nez", "María and Nuñez"),
+    ],
+)
+def test_latex_accents_to_unicode_converts_accents(tex, expected):
+    assert latex_accents_to_unicode(tex) == expected
+
+
+def test_latex_accents_to_unicode_keeps_other_markup():
+    tex = r"\author[a]{A}\affiliation[a]{B} \vec{x} \label{y} \textit{z} \iota \omega \ldots \cite{w} \% \&"
+    assert latex_accents_to_unicode(tex) == tex
 
 
 @pytest.mark.parametrize(

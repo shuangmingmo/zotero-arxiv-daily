@@ -26,6 +26,15 @@ _TEXT_COMMAND = re.compile(
     r"|\\[A-Za-z]+(?:\s*\{[^{}]*\})*"         # \v{r}, \emph{word}, \o{}, \ss
     r"|\\[^A-Za-z\s](?:\{[^{}]*\}|[A-Za-z])?"  # \'i, \"{o}, \%, \&
 )
+# Accents and special letters only (\"a, \'{e}, \v{r}, \c c, {\o}, \ss), leaving every other command
+# in place. Symbol accents take a letter or a group; letter accents need a group or a space.
+_TEXT_ACCENT = re.compile(
+    r"\{\\(?:[\"'`^~=.][^{}]*|[uvHckrdbt][\s{][^{}]*|(?:ss|ae|AE|oe|OE|aa|AA|o|O|l|L|i|j)\b[^{}]*)\}"
+    r"|\\[\"'`^~=.]\s*(?:\{[^{}]*\}|\\[ij]\b|[A-Za-z])"
+    r"|\\[uvHckrdbt](?:\{[^{}]*\}|\s+[A-Za-z])"
+    # As in TeX, the spaces after a control word are swallowed: "stra\ss e" is "straße".
+    r"|\\(?:ss|ae|AE|oe|OE|aa|AA|o|O|l|L|i|j)(?![A-Za-z])(?:\{\}|[ \t]+)?"
+)
 _BOLD = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", re.DOTALL)
 _ITALIC = re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?![\w*])")
 _PLACEHOLDER = "\x00{}\x00"
@@ -47,6 +56,15 @@ def latex_to_unicode(text: str) -> str:
     text = _TEXT_COMMAND.sub(lambda m: _latex_to_text(m.group(0)), text)
     # Remaining braces only group letters, as in "{QCD}" or "c{\i}" after conversion.
     return text.replace("{", "").replace("}", "")
+
+
+def latex_accents_to_unicode(tex: str) -> str:
+    """Replace only accent commands and special letters in LaTeX source, keeping all other markup.
+
+    Used on paper source before it goes to the LLM: "Universit\\"at" -> "Universität", while
+    \\author{...} and \\affiliation{...} stay, so the model can still see what each line is.
+    """
+    return _TEXT_ACCENT.sub(lambda m: _latex_to_text(m.group(0).rstrip(" \t")), tex)
 
 
 def _group_end(tex: str, start: int) -> int:

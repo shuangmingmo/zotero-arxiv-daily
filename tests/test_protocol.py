@@ -151,6 +151,19 @@ def test_affiliations_with_latex_accents_are_converted(llm_params, response):
     ]
 
 
+def test_affiliations_prompt_has_accents_as_letters(llm_params):
+    # From arXiv 2611.19144, where the model returned "Bergische Universiti¿½t Wuppertal".
+    full_text = (
+        "\\author[c]{Francesco Scardino}\n"
+        "\\affiliation[c]{Department of Physics, Bergische Universit\\\"at Wuppertal, Gau\\ss stra\\ss e 20}\n"
+        "\\begin{document}"
+    )
+    client, sent = _recording_client('["Bergische Universität Wuppertal"]')
+    make_sample_paper(full_text=full_text).generate_affiliations(client, llm_params)
+    user = sent[0][1]["content"]
+    assert "\\affiliation[c]{Department of Physics, Bergische Universität Wuppertal, Gaußstraße 20}" in user
+
+
 def test_affiliations_prompt_starts_at_author_block_after_long_preamble(llm_params):
     # A preamble far longer than the prompt limit, including a macro *definition* named like an
     # author command, which must not be mistaken for the author block.
