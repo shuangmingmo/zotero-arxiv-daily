@@ -1,10 +1,9 @@
 name: Send emails daily
 
+# Started every morning at 09:17 Europe/Zurich by a Google Cloud Scheduler job that calls
+# GitHub's workflow_dispatch API. GitHub's own `schedule:` trigger silently stopped firing twice.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '17 9 * * *'
-      timezone: 'Europe/Zurich'
 
 concurrency:
   group: zotero-arxiv-daily
@@ -14,6 +13,9 @@ jobs:
   calculate-and-send:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # healthchecks.io ping URL; it emails an alert when a run fails or no run finishes on time.
+      HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
 
     steps:
       - name: Checkout
@@ -55,3 +57,11 @@ jobs:
           done
 
           exit 1
+
+      - name: Report success to healthchecks.io
+        if: success() && env.HEALTHCHECK_URL != ''
+        run: curl -fsS -m 10 --retry 3 -o /dev/null "$HEALTHCHECK_URL" || echo "healthchecks.io ping failed"
+
+      - name: Report failure to healthchecks.io
+        if: (failure() || cancelled()) && env.HEALTHCHECK_URL != ''
+        run: curl -fsS -m 10 --retry 3 -o /dev/null "$HEALTHCHECK_URL/fail" || echo "healthchecks.io ping failed"
