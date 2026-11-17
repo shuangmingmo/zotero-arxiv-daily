@@ -1,5 +1,7 @@
 """Tests for zotero_arxiv_daily.protocol: Paper.generate_tldr, Paper.generate_affiliations."""
 
+import json
+
 import pytest
 
 from tests.canned_responses import make_sample_paper, make_stub_openai_client
@@ -125,6 +127,28 @@ def test_affiliations_keep_author_order_and_drop_repeats(llm_params):
     client, _ = _recording_client('["Univ B", "Univ A", "Univ B", " ", "Univ C"]')
     paper = make_sample_paper()
     assert paper.generate_affiliations(client, llm_params) == ["Univ B", "Univ A", "Univ C"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # Invalid JSON: the model copied a LaTeX accent from the paper (seen on arXiv 2611.18841).
+        r'["ShanghaiTech University", "Laboratoire d’Annecy de Physique Th\'eorique", "University of Calgary"]',
+        # Valid JSON whose strings still hold LaTeX.
+        json.dumps(
+            ["ShanghaiTech University", r"Laboratoire d’Annecy de Physique Th\'eorique", "University of Calgary"],
+            ensure_ascii=False,
+        ),
+    ],
+)
+def test_affiliations_with_latex_accents_are_converted(llm_params, response):
+    client, _ = _recording_client(response)
+    paper = make_sample_paper()
+    assert paper.generate_affiliations(client, llm_params) == [
+        "ShanghaiTech University",
+        "Laboratoire d’Annecy de Physique Théorique",
+        "University of Calgary",
+    ]
 
 
 def test_affiliations_prompt_starts_at_author_block_after_long_preamble(llm_params):

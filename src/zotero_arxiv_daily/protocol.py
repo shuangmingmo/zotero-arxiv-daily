@@ -6,6 +6,7 @@ import tiktoken
 from openai import OpenAI
 from loguru import logger
 import json
+from .text_format import latex_to_unicode
 RawPaperItem = TypeVar('RawPaperItem')
 
 AFFILIATION_PROMPT_TOKENS = 2000
@@ -145,9 +146,13 @@ class Paper:
             )
 
             affiliations = re.search(r'\[.*?\]', affiliations, flags=re.DOTALL).group(0)
-            affiliations = json.loads(affiliations)
+            try:
+                affiliations = json.loads(affiliations)
+            except json.JSONDecodeError:
+                # LaTeX copied from the paper, such as Th\'eorique, is not a valid JSON escape.
+                affiliations = json.loads(latex_to_unicode(affiliations))
             # Drop blanks and repeats but keep author order (a set would shuffle it).
-            affiliations = [str(a).strip() for a in affiliations]
+            affiliations = [latex_to_unicode(str(a)).strip() for a in affiliations]
             affiliations = list(dict.fromkeys(a for a in affiliations if a))
 
             return affiliations
